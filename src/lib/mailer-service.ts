@@ -188,6 +188,15 @@ class MailerService {
       const pages = context.pages();
       const page = pages.length > 0 ? pages[0] : await context.newPage();
 
+      // Suppress any native OS file chooser / attachment folder windows
+      page.on("filechooser", async () => {
+        // Intercepted and blocked to prevent OS folder dialog from opening
+      });
+
+      context.on("page", (newPage) => {
+        newPage.on("filechooser", async () => {});
+      });
+
       instance.context = context;
       instance.page = page;
       instance.status.browserRunning = true;
@@ -241,7 +250,7 @@ class MailerService {
 
       // Check for logged-in indicators in Roundcube (compose button or mail list)
       const hasCompose = await page
-        .locator("a.button-compose, #rcmbtn107, a[href*='_action=compose'], .compose")
+        .locator("a.button-compose, a.compose, a[href*='_action=compose'], button.compose, [data-action='compose']")
         .isVisible({ timeout: 2000 })
         .catch(() => false);
 
@@ -640,10 +649,8 @@ class MailerService {
     try {
       await toInput.click({ timeout: 2000 }).catch(() => {});
       await toInput.fill(contact.email);
-      // In tokeninput, pressing Enter and Comma commits the recipient pill/badge
+      // In tokeninput, pressing Enter commits the recipient pill/badge
       await toInput.press("Enter");
-      await toInput.press(",");
-      await toInput.press("Tab");
     } catch {
       // fallback to DOM evaluation
     }
@@ -911,23 +918,39 @@ class MailerService {
         }
       }
 
-      // Remove disabled classes from any send buttons
+      // Remove disabled classes from any send buttons (strictly send buttons, never attach)
       const btns = document.querySelectorAll(
-        "#messagetoolbar .send, .header .send, button.send, a.button.send, #rcmbtn107, [data-action='send']",
+        "#messagetoolbar .send, .header .send, button.send:not(.attach), a.button.send:not(.attach), [data-action='send']",
       );
       btns.forEach((b) => {
         b.classList.remove("disabled");
         b.removeAttribute("disabled");
         b.removeAttribute("aria-disabled");
       });
+
+      // Suppress and close any attachment panels or file inputs
+      document.querySelectorAll<HTMLInputElement>('input[type="file"]').forEach((inp) => {
+        inp.setAttribute("disabled", "disabled");
+        inp.onclick = (e: Event) => {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        };
+      });
+
+      const attachPane = document.getElementById("compose-attachments");
+      if (attachPane) {
+        attachPane.style.display = "none";
+        attachPane.classList.remove("open");
+      }
     });
 
     this.addLog("info", `Clicking Send button for ${contact.email}...`, instanceId);
 
-    // Click the actual Send button element
+    // Click the actual Send button element (strictly SEND, never attach or file inputs)
     const sendButton = page
       .locator(
-        "#messagetoolbar button.send, #messagetoolbar a.send, .header button.send, button.btn-primary.send, button.send, a.button.send, a.buttonsend, #rcmbtn107, [data-action='send'], button[name='_send']",
+        "#messagetoolbar button.send, #messagetoolbar a.send, #messagetoolbar [onclick*=\"'send'\"], button.btn-primary.send, button.send:not(.attach), a.button.send:not(.attach), button[data-action='send'], a[data-action='send'], button[name='_send']",
       )
       .first();
 
@@ -959,9 +982,9 @@ class MailerService {
         if (typeof win.rcmail.command === "function") {
           try {
             const btn = document.querySelector(
-              "#messagetoolbar .send, button.send, a.button.send, #rcmbtn107",
+              "#messagetoolbar button.send, #messagetoolbar a.send, #messagetoolbar [onclick*=\"'send'\"], button.send:not(.attach), a.button.send:not(.attach), [data-action='send']",
             );
-            win.rcmail.command("send", "", btn);
+            win.rcmail.command("send", "", btn || undefined);
           } catch {
             // fallback
           }
@@ -1052,31 +1075,10 @@ class MailerService {
     page: Page,
   ): Promise<void> {
     try {
-      // 1. Check if #_priority or select[name='_priority'] is visible directly
+      // 1. Check if #_priority or select[name='_priority'] is available in DOM
       const prioritySelect = page
         .locator("#_priority, select[name='_priority']")
         .first();
-
-      let isVisible = await prioritySelect
-        .isVisible({ timeout: 1500 })
-        .catch(() => false);
-
-      // If priority dropdown is collapsed or hidden inside options accordion in Roundcube, toggle it
-      if (!isVisible) {
-        const optionsToggle = page
-          .locator(
-            "a[href*='#options'], a#composeoptionstoggle, a.button.options, button:has-text('Options'), a:has-text('Options'), #composeoptions, a[onclick*='options']",
-          )
-          .first();
-
-        if (await optionsToggle.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await optionsToggle.click().catch(() => {});
-          await new Promise((r) => setTimeout(r, 400));
-          isVisible = await prioritySelect
-            .isVisible({ timeout: 1500 })
-            .catch(() => false);
-        }
-      }
 
       let prioritySet = false;
 
