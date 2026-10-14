@@ -1,14 +1,24 @@
 import { NextRequest } from "next/server";
 import { isRecord, type NihProject } from "../../../../types/nih";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const NIH_API_URL = "https://api.reporter.nih.gov/v2/projects/search";
 const PAGE_SIZE = 500;
 const MAX_OFFSET = 14999;
 const REQUEST_DELAY_MS = 1050;
 const MAX_TARGET = 30000;
 
-const sleep = (ms: number) =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise((resolve) => {
+    if (signal?.aborted) return resolve(undefined);
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve(undefined);
+    }, { once: true });
+  });
 
 type SearchRequest = {
   keywords?: string;
@@ -93,21 +103,43 @@ function buildCriteria(body: SearchRequest): Criteria {
     );
   }
 
-  if (keywords.trim()) {
+  const searchTerms = keywords
+    .split(",")
+    .map((keyword) => keyword.trim())
+    .filter(Boolean);
+
+  if (searchTerms.length > 0) {
     criteria.advanced_text_search = {
-      operator: "and",
+      operator: searchTerms.length > 1 ? "or" : "and",
       search_field: "all",
-      search_text: keywords.trim(),
+      search_text:
+        searchTerms.length > 1
+          ? searchTerms
+              .map((keyword) => `"${keyword.replace(/"/g, '\\"')}"`)
+              .join(" ")
+          : searchTerms[0],
     };
   }
 
   if (Array.isArray(countries)) {
     const validCountries = countries
       .filter(isRealFilterValue)
-      .map((country) => country.trim().toUpperCase());
+      .flatMap((country) => {
+        const upper = country.trim().toUpperCase();
+        if (upper === "UAE" || upper === "UNITED ARAB EMIRATES (UAE)") {
+          return ["UNITED ARAB EMIRATES", "UAE"];
+        }
+        if (upper === "USA" || upper === "US") {
+          return ["UNITED STATES", "USA"];
+        }
+        if (upper === "UK") {
+          return ["UNITED KINGDOM", "UK"];
+        }
+        return [upper];
+      });
 
     if (validCountries.length > 0) {
-      criteria.org_countries = validCountries;
+      criteria.org_countries = Array.from(new Set(validCountries));
     }
   }
 
@@ -156,9 +188,18 @@ function buildIncludeFields() {
 async function callNih(
   payload: Record<string, unknown>,
   waitBeforeRequest: boolean,
+  signal?: AbortSignal,
 ): Promise<NihPage> {
+  if (signal?.aborted) {
+    throw new Error("Search aborted by user");
+  }
+
   if (waitBeforeRequest) {
-    await sleep(REQUEST_DELAY_MS);
+    await sleep(REQUEST_DELAY_MS, signal);
+  }
+
+  if (signal?.aborted) {
+    throw new Error("Search aborted by user");
   }
 
   const response = await fetch(NIH_API_URL, {
@@ -169,6 +210,7 @@ async function callNih(
     },
     body: JSON.stringify(payload),
     cache: "no-store",
+    signal,
   });
 
   const text = await response.text();
@@ -215,6 +257,7 @@ async function continueSearchSet(
   first: NihPage,
   wanted: number,
   onProgress?: ProgressCallback,
+  signal?: AbortSignal,
 ): Promise<{ projects: Record<string, unknown>[]; total: number; requests: number }> {
   if (wanted <= 0) {
     return { projects: [], total: first.total, requests: 0 };
@@ -243,6 +286,10 @@ async function continueSearchSet(
   let offset = projects.length;
 
   while (offset < target) {
+    if (signal?.aborted) {
+      break;
+    }
+
     if (offset > MAX_OFFSET) {
       throw new Error(
         `NIH pagination reached its ${MAX_OFFSET.toLocaleString()} offset limit. The search must be partitioned further.`,
@@ -258,6 +305,7 @@ async function continueSearchSet(
         limit: Math.min(PAGE_SIZE, remaining),
       },
       true,
+      signal,
     );
 
     requests += 1;
@@ -458,8 +506,9 @@ async function collectPartitioned(
   const collected = new Map<string, Record<string, unknown>>();
   let matchingTotal = 0;
   let requests = 0;
+  const sortedYears = [...years].sort((a, b) => b - a);
 
-  for (const year of years) {
+  for (const year of sortedYears) {
     if (collected.size >= target) break;
 
     const yearCriteria = {
@@ -594,6 +643,7 @@ export async function POST(request: NextRequest) {
             sort_order: "desc",
           },
           false,
+          request.signal,
         );
 
         requests += 1;
@@ -604,11 +654,12 @@ export async function POST(request: NextRequest) {
           `Received first NIH page (${Math.min(first.results.length, target).toLocaleString()} records)...`,
         );
 
-        if (first.total <= MAX_OFFSET + 1) {
+        if (target <= MAX_OFFSET + 1 || first.total <= MAX_OFFSET + 1) {
           const set = await continueSearchSet(
             first,
             Math.min(target, first.total),
             reportProgress,
+            request.signal,
           );
 
           rawProjects = set.projects;
@@ -684,7 +735,6 @@ export async function POST(request: NextRequest) {
     headers: {
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     },
   });

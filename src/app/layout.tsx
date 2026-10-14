@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NIH Research Explorer",
+  title: "NIH Explorer & BigRock Automated Mailer",
   description:
-    "Search NIH-funded research projects and find public author emails from linked PubMed publications.",
+    "Discover NIH research projects, extract verified PubMed author emails, and automate BigRock Roundcube webmail campaigns with parallel instances.",
 };
 
 export default function RootLayout({
@@ -28,7 +28,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col bg-[#faf8ff] text-slate-800">{children}</body>
     </html>
   );
 }
